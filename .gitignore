@@ -1,0 +1,18 @@
+# ---------- ESP-IDF 构建产物 ----------
+/build/
+/managed_components/
+/dependencies.lock
+
+# 自动生成的配置快照（由 sdkconfig.defaults + target 推导，不入库）
+/sdkconfig
+
+# ---------- 本地真实配置 ----------
+# 后续会往里写 WiFi 密码、API Key 等，只提交 config.example.h 作为模板
+/main/config.h
+
+# ---------- 编辑器 / 系统 ----------
+/.vscode/
+/.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
