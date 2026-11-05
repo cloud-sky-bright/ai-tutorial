@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "font.h"
 
 static const char* TAG = "ssd1306";
 SSD1306::SSD1306(i2c_port_num_t port, gpio_num_t sda, gpio_num_t scl, uint8_t addr) : port_(port), sda_(sda), scl_(scl), addr_(addr){}
@@ -93,6 +94,9 @@ void SSD1306::Clear(uint8_t pattern) {
 }
 
 void SSD1306::Flush() {
+    if(dev_ == nullptr){
+        return;
+    }
     static const uint8_t kSetWindow[] = {
         0x21, 0x00, 0x7F,
         0x22, 0x00, 0x03,
@@ -184,4 +188,25 @@ void SSD1306::DrawBootScreen(){
         DrawPixel(x, y, true);
     }
     Flush();
+}
+
+void SSD1306::DrawChar(int x, int y, char c) {
+    const uint8_t* glyph = FontGetGlyph(c);
+
+    for(int row = 0; row < FONT_HEIGHT; row++){
+        const uint8_t bits = glyph[row];
+        for(int col = 0; col < FONT_WIDTH; col++){
+            if((bits & (0x80 >> col)) != 0){
+                DrawPixel(x + col, y + row, true);
+            }
+        }
+    }
+}
+
+void SSD1306::DrawString(int x, int y, const char* s) {
+    while(*s != '\0'){
+        DrawChar(x, y, *s);
+        x += FONT_WIDTH;
+        s++;
+    }
 }

@@ -16,6 +16,8 @@ public:
     void Flush();
 
     void DrawBootScreen();
+    void DrawChar(int x, int y, char c);
+    void DrawString(int x, int y, const char* s);
 
 private:
     void WriteCommands(const uint8_t* cmds, size_t n);
