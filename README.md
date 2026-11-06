@@ -49,7 +49,8 @@ Linux / macOS 把 `Copy-Item` 换成 `cp`、`COM12` 换成 `/dev/ttyACM0` 之类
 |---|---|---|
 | `stage1` | 工程骨架：分区表 / PSRAM / 日志配置；RMT 驱动板载 WS2812 三色灯 | `main/led.cc` `main/led.h` |
 | `stage2` | 显示系统：SSD1306 I2C 驱动、8×16 字模、`Display` 上层（状态栏 / 通知 / 聊天行） | `main/ssd1306.*` `main/font.*` `main/display.*` `tools/gen_font8x16.ps1` |
-| `stage3` | *规划中* | — |
+| `stage3` | Wi-Fi 接入：`WifiStation` 封装（扫描/关联、事件回调、`esp_timer` 5 秒自动重连）、心跳栏显示 IP / RSSI / PSRAM 空闲 | `main/wifi.cc` `main/wifi.h` |
+| `stage4` | *规划中* | — |
 
 查看仓库里已有哪些期：
 
@@ -105,6 +106,9 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 5. **数组用变量当下标之前，必须先做边界检查**
    `stage2` 曾经因为 `SetChatMessage` 折出的行数超过屏幕行数 `kRows`，`lines_[line_count_]` 越界写把 `line_count_` 自己覆盖成了字符串内容，随后拿文本字节当地址用 → `Guru Meditation Error: StoreProhibited` → **无限重启**。`0x952f80d5` 这种非对齐地址 + 寄存器里出现 ASCII，就是典型的"索引变量被踩"信号。
 
+6. **Wi-Fi 第一次连接失败，通常不是密码错**
+   `stage3` 实测：上电第一次 `esp_wifi_connect()` 花了 2.4 秒后报断开，期间日志里**完全没有** `state: init -> auth -> assoc -> run` 这三行 → 说明卡在**扫描阶段就没找到 AP**（reason 201 `NO_AP_FOUND`）；而 5 秒后的重试只花 110 毫秒，因为 `new:<1,0>` 表示它直接锁定信道 1、跳过了全信道扫描。手机热点尤其容易这样（锁屏省电会降低 Beacon 广播）。**排查第一步是把 `wifi_event_sta_disconnected_t::reason` 打进日志**，光看"连接断开"四个字定不了位。另外默认开的 modem sleep（日志里 `pm start, type: 1`）会让连接期间 80%+ 时间在休眠，表现为"跑着跑着莫名掉线"，教学/调试阶段建议 `esp_wifi_set_ps(WIFI_PS_NONE)`。
+
 ## 目录结构
 
 ```
@@ -121,6 +125,7 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 │   ├── ssd1306.cc / ssd1306.h  OLED 寄存器级驱动 + 显存
 │   ├── font.cc / font.h        8×16 字模
 │   ├── display.cc / display.h  显示上层（状态栏 / 通知 / 聊天）
+│   ├── wifi.cc / wifi.h        Wi-Fi 站点模式封装（事件回调 + 自动重连）
 │   └── main.cc                 app_main 入口
 └── tools
     └── gen_font8x16.ps1        字模生成脚本（改字体后重新生成 font.cc）

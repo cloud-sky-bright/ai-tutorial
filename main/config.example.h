@@ -26,3 +26,6 @@
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 32
 
+
+#define WIFI_SSID "your_wifi_ssid"
+#define WIFI_PASSWORD "your_wifi_password"
