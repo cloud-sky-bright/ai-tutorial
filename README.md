@@ -50,7 +50,8 @@ Linux / macOS 把 `Copy-Item` 换成 `cp`、`COM12` 换成 `/dev/ttyACM0` 之类
 | `stage1` | 工程骨架：分区表 / PSRAM / 日志配置；RMT 驱动板载 WS2812 三色灯 | `main/led.cc` `main/led.h` |
 | `stage2` | 显示系统：SSD1306 I2C 驱动、8×16 字模、`Display` 上层（状态栏 / 通知 / 聊天行） | `main/ssd1306.*` `main/font.*` `main/display.*` `tools/gen_font8x16.ps1` |
 | `stage3` | Wi-Fi 接入：`WifiStation` 封装（扫描/关联、事件回调、`esp_timer` 5 秒自动重连）、心跳栏显示 IP / RSSI / PSRAM 空闲 | `main/wifi.cc` `main/wifi.h` |
-| `stage4` | *规划中* | — |
+| `stage4` | 状态机与按键：`DeviceStateMachine` 合法迁移表 + 监听器；`Button` 20ms 轮询消抖、短按/长按/按下/松开四种事件；BOOT 键点按切换说话状态，TALK 键按住说话 | `main/device_state_machine.*` `main/device_state.h` `main/button.*` |
+| `stage5` | *规划中* | — |
 
 查看仓库里已有哪些期：
 
@@ -109,6 +110,12 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 6. **Wi-Fi 第一次连接失败，通常不是密码错**
    `stage3` 实测：上电第一次 `esp_wifi_connect()` 花了 2.4 秒后报断开，期间日志里**完全没有** `state: init -> auth -> assoc -> run` 这三行 → 说明卡在**扫描阶段就没找到 AP**（reason 201 `NO_AP_FOUND`）；而 5 秒后的重试只花 110 毫秒，因为 `new:<1,0>` 表示它直接锁定信道 1、跳过了全信道扫描。手机热点尤其容易这样（锁屏省电会降低 Beacon 广播）。**排查第一步是把 `wifi_event_sta_disconnected_t::reason` 打进日志**，光看"连接断开"四个字定不了位。另外默认开的 modem sleep（日志里 `pm start, type: 1`）会让连接期间 80%+ 时间在休眠，表现为"跑着跑着莫名掉线"，教学/调试阶段建议 `esp_wifi_set_ps(WIFI_PS_NONE)`。
 
+7. **按键"按下了但屏幕没反应"，多数不是按键坏了**
+   `stage4` 碰到两个观测陷阱：① `kDebounceUs = 40ms` 但轮询周期是 20ms，判定用的是严格大于 `>`，`0→20→40→60` 里 `40 > 40` 不成立，所以**实际消抖窗口是 60ms**；也就是说窗口被采样周期量化了，把常量改成比 20ms 小的值（如 10）**不会生效**，想改就得让常量是轮询周期的整数倍。② 主循环一轮是 `60ms + 940ms = 1s`，`SetStatus` 只在那里调，所以**状态机是毫秒级、屏幕是 1Hz**；快速短按（<1s）的那次 `listening` 会被显示循环整个跳过，看起来就像"按了没反应"。真相在 `state: Transitioned from X to Y` 日志里（毫秒级打印），不在屏上。想要屏也跟得上，就把刷新放进 `AddStateChangeListener` 回调（一次 I2C 刷新约 12ms，但不能在里面阻塞）。
+
+8. **单击（click）必然在"松开"时触发，不是代码写反了**
+   按下那一刻无法区分"单击"和"长按"，只能先记下 `press_start_us_`；按住满 `long_press_time_`（默认 1000ms）就发 `on_long_press_` 并置 `long_press_fired_`，否则要等到松开、确认 `!long_press_fired_` 才发 `on_click_`。所以 BOOT 键（注册的是 `OnClick`）表现为"松开才变化"，TALK 键（注册的是 `OnPressDown/Up`）才是"按下就变"——两颗键手感不同是设计使然。
+
 ## 目录结构
 
 ```
@@ -126,6 +133,9 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 │   ├── font.cc / font.h        8×16 字模
 │   ├── display.cc / display.h  显示上层（状态栏 / 通知 / 聊天）
 │   ├── wifi.cc / wifi.h        Wi-Fi 站点模式封装（事件回调 + 自动重连）
+│   ├── device_state_machine.*  状态机（合法迁移表 + 状态变化监听器）
+│   ├── device_state.h          状态枚举
+│   ├── button.cc / button.h    按键（20ms 轮询消抖 + 按下/松开/单击/长按）
 │   └── main.cc                 app_main 入口
 └── tools
     └── gen_font8x16.ps1        字模生成脚本（改字体后重新生成 font.cc）
