@@ -12,33 +12,63 @@
 #include "nvs_flash.h"
 #include "device_state_machine.h"
 #include "button.h"
+#include "audio_codec.h"
+#include "no_audio_codec.h"
+#include <string>
+#include <vector>
 
 #include "device_state.h"
 
 
-static const char* TAG = "stage4";
+static const char* TAG = "stage5";
 
 static void LedColorForState(Led& led, DeviceState state) {
-        switch(state){
-            case kDeviceStateListening:
-                led.SetColor(0, 28, 0);
-                break;
-            case kDeviceStateSpeaking:
-                led.SetColor(28, 0, 28);
-                break;
-            case kDeviceStateIdle:
-                led.SetColor(0, 0, 12);
-                break;
-            default:
-                led.SetColor(16, 16, 0);
-                break;
-        }
+    switch(state){
+        case kDeviceStateListening:
+            led.SetColor(0, 28, 0);
+            break;
+        case kDeviceStateSpeaking:
+            led.SetColor(28, 0, 28);
+            break;
+        case kDeviceStateIdle:
+            led.SetColor(0, 0, 12);
+            break;
+        default:
+            led.SetColor(16, 16, 0);
+            break;
     }
+}
+
+static void ShowMicLevel(Display& display, AudioCodec& codec){
+    static std::vector<int16_t> pcm(AUDIO_CODEC_DMA_FRAME_NUM);
+    if(!codec.InputData(pcm)){
+        return;
+    }
+    int64_t sum = 0;
+    for(int16_t s : pcm){
+        sum += (s >= 0) ? s : -s;
+    }
+    const int mean = static_cast<int>(sum / pcm.size());
+    int level = mean / 300;
+    if(level > 12){
+        level = 12;
+    }
+    std::string bar = "[";
+
+    for(int i = 0; i < 12; i++){
+        bar += (i < level) ? "#" : ".";
+    }
+
+    bar += "]";
+    char head[16];
+    snprintf(head, sizeof(head), "Mic: %d", mean);
+    display.ShowNotification((std::string(head) + "\n" + bar).c_str());
+}
 
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=============================");
-    ESP_LOGI(TAG, "小智简易版 · stage 4 (状态机和按钮)");
+    ESP_LOGI(TAG, "小智简易版 · stage 5 音频采集");
     ESP_LOGI(TAG, "=============================");
     
     esp_err_t nvs_err = nvs_flash_init();
@@ -83,7 +113,7 @@ extern "C" void app_main(void)
         oled.DrawBootScreen();
         vTaskDelay(pdMS_TO_TICKS(1000));
         display.SetStatus(DeviceStateMachine::GetStateName(machine.GetState()));
-        display.SetChatMessage("sys", "stage4 boot");
+        display.SetChatMessage("sys", "stage5 boot");
     }
     else{
         ESP_LOGW(TAG, "Display initialization failed, 跳过显示功能");
@@ -134,6 +164,8 @@ extern "C" void app_main(void)
         }
     });
 
+    NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
+
     DeviceState last_state = machine.GetState();
 
     bool last_connected = false;
@@ -144,6 +176,15 @@ extern "C" void app_main(void)
             machine.TransitionTo(kDeviceStateIdle);
         }
         const DeviceState state = machine.GetState();
+
+        if(state != last_state){
+            if(state == kDeviceStateListening){
+                audio_codec.EnableInput(true);
+            }
+            else if(last_state == kDeviceStateListening){
+                audio_codec.EnableInput(false);
+            }
+        }
         LedColorForState(led, state);
         vTaskDelay(pdMS_TO_TICKS(60));
         led.Off();
@@ -162,6 +203,10 @@ extern "C" void app_main(void)
             if(state != last_state){
                 display.SetChatMessage("state", DeviceStateMachine::GetStateName(state));
             }
+
+            if(state == kDeviceStateListening){
+                ShowMicLevel(display, audio_codec);
+            }
         }
         last_state = state;
         if(heartbeat % 5 == 0){
@@ -173,7 +218,7 @@ extern "C" void app_main(void)
             }
         }
         
-        vTaskDelay(pdMS_TO_TICKS(940));
+        vTaskDelay(pdMS_TO_TICKS(state == kDeviceStateListening ? 60 : 940));
     }
 }
 

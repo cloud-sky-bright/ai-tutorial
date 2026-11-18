@@ -51,7 +51,8 @@ Linux / macOS 把 `Copy-Item` 换成 `cp`、`COM12` 换成 `/dev/ttyACM0` 之类
 | `stage2` | 显示系统：SSD1306 I2C 驱动、8×16 字模、`Display` 上层（状态栏 / 通知 / 聊天行） | `main/ssd1306.*` `main/font.*` `main/display.*` `tools/gen_font8x16.ps1` |
 | `stage3` | Wi-Fi 接入：`WifiStation` 封装（扫描/关联、事件回调、`esp_timer` 5 秒自动重连）、心跳栏显示 IP / RSSI / PSRAM 空闲 | `main/wifi.cc` `main/wifi.h` |
 | `stage4` | 状态机与按键：`DeviceStateMachine` 合法迁移表 + 监听器；`Button` 20ms 轮询消抖、短按/长按/按下/松开四种事件；BOOT 键点按切换说话状态，TALK 键按住说话 | `main/device_state_machine.*` `main/device_state.h` `main/button.*` |
-| `stage5` | *规划中* | — |
+| `stage5` | 音频采集：`AudioCodec` 抽象基类（模板方法：公开 `InputData` 统一入口、派生类只实现 `Read`）+ `NoAudioCodecSimplex` 直驱 I2S0 读 INMP441；处于 listening 时屏上显示实时 MIC 电平条 | `main/audio_codec.*` `main/no_audio_codec.*` |
+| `stage6` | *规划中* | — |
 
 查看仓库里已有哪些期：
 
@@ -116,6 +117,9 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 8. **单击（click）必然在"松开"时触发，不是代码写反了**
    按下那一刻无法区分"单击"和"长按"，只能先记下 `press_start_us_`；按住满 `long_press_time_`（默认 1000ms）就发 `on_long_press_` 并置 `long_press_fired_`，否则要等到松开、确认 `!long_press_fired_` 才发 `on_click_`。所以 BOOT 键（注册的是 `OnClick`）表现为"松开才变化"，TALK 键（注册的是 `OnPressDown/Up`）才是"按下就变"——两颗键手感不同是设计使然。
 
+9. **I2S 麦克风读回来全是 0，先分清是"没时钟"还是"没数据"**
+   `stage5` 调试实录：先打印 32 位原始值，得到 `bytes=960 raw: 0 0 0 0 0 0`——`bytes=960` 恰好是 240 帧 × 4 字节，说明**通道使能、DMA 搬运、时钟输出全部正常**，问题只可能在那根数据线上。验证法：把 DIN 引脚临时当普通 GPIO，分别开内部上拉/下拉各读一次——`上拉读=1 下拉读=0` 就是**悬空**（没人驱动）。INMP441 上最常见三处：① 构造参数顺序写错（`(sample_rate, sck, ws, din)` 被传成 `(…, ws, sck, din)`，WS/SCK 互换后时序全废）；② **L/R 脚悬空** → 数据脚 SD 进高阻 → 读全 0（接 GND 才是左声道）；③ L/R 接 3.3V 时数据只在右声道，而代码读的是 `I2S_STD_SLOT_LEFT` → 也是全 0。另一个判断技巧：因为 `InputData()` 读失败会直接 `return false` 而屏幕不刷新，所以**只要屏上能显示出 "Mic: 0"，就证明读取是成功的**，不用再怀疑通道使能。最后：INMP441 是 24 位数据，`raw[i] >> 12` 只砍 12 位会留下 16 倍余量导致饱和，确认对齐方式后应为 `>> 16`（左对齐）或 `>> 8`（右对齐）。
+
 ## 目录结构
 
 ```
@@ -136,6 +140,8 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 │   ├── device_state_machine.*  状态机（合法迁移表 + 状态变化监听器）
 │   ├── device_state.h          状态枚举
 │   ├── button.cc / button.h    按键（20ms 轮询消抖 + 按下/松开/单击/长按）
+│   ├── audio_codec.cc / .h     音频输入抽象基类（InputData → Read 模板方法）
+│   ├── no_audio_codec.*        不用编解码芯片、直驱 I2S 的派生实现（INMP441）
 │   └── main.cc                 app_main 入口
 └── tools
     └── gen_font8x16.ps1        字模生成脚本（改字体后重新生成 font.cc）
