@@ -12,15 +12,16 @@
 #include "nvs_flash.h"
 #include "device_state_machine.h"
 #include "button.h"
-#include "audio_codec.h"
-#include "no_audio_codec.h"
+#include "audio/audio_codec.h"
+#include "audio/no_audio_codec.h"
+#include "audio/audio_service.h"
 #include <string>
 #include <vector>
 
 #include "device_state.h"
 
 
-static const char* TAG = "stage5";
+static const char* TAG = "stage6";
 
 static void LedColorForState(Led& led, DeviceState state) {
     switch(state){
@@ -39,36 +40,51 @@ static void LedColorForState(Led& led, DeviceState state) {
     }
 }
 
-static void ShowMicLevel(Display& display, AudioCodec& codec){
-    static std::vector<int16_t> pcm(AUDIO_CODEC_DMA_FRAME_NUM);
-    if(!codec.InputData(pcm)){
-        return;
-    }
-    int64_t sum = 0;
-    for(int16_t s : pcm){
-        sum += (s >= 0) ? s : -s;
-    }
-    const int mean = static_cast<int>(sum / pcm.size());
-    int level = mean / 300;
-    if(level > 12){
-        level = 12;
+// static void ShowMicLevel(Display& display, AudioCodec& codec){
+//     static std::vector<int16_t> pcm(AUDIO_CODEC_DMA_FRAME_NUM);
+//     if(!codec.InputData(pcm)){
+//         return;
+//     }
+//     int64_t sum = 0;
+//     for(int16_t s : pcm){
+//         sum += (s >= 0) ? s : -s;
+//     }
+//     const int mean = static_cast<int>(sum / pcm.size());
+//     int level = mean / 300;
+//     if(level > 12){
+//         level = 12;
+//     }
+//     std::string bar = "[";
+
+//     for(int i = 0; i < 12; i++){
+//         bar += (i < level) ? "#" : ".";
+//     }
+
+//     bar += "]";
+//     char head[16];
+//     snprintf(head, sizeof(head), "Mic: %d", mean);
+//     display.ShowNotification((std::string(head) + "\n" + bar).c_str());
+// }
+
+static void ShowLevelBar(Display& display, int level){
+    int cells = level / 250;
+    if(cells > 14){
+        cells = 14;
     }
     std::string bar = "[";
-
-    for(int i = 0; i < 12; i++){
-        bar += (i < level) ? "#" : ".";
+    for(int i = 0; i < 14; i++){
+        bar += (i < cells) ? "#" : ".";
     }
-
     bar += "]";
     char head[16];
-    snprintf(head, sizeof(head), "Mic: %d", mean);
+    snprintf(head, sizeof(head), "Mic: %d", level);
     display.ShowNotification((std::string(head) + "\n" + bar).c_str());
 }
 
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=============================");
-    ESP_LOGI(TAG, "小智简易版 · stage 5 音频采集");
+    ESP_LOGI(TAG, "小智简易版 · stage 6 音频服务");
     ESP_LOGI(TAG, "=============================");
     
     esp_err_t nvs_err = nvs_flash_init();
@@ -113,7 +129,7 @@ extern "C" void app_main(void)
         oled.DrawBootScreen();
         vTaskDelay(pdMS_TO_TICKS(1000));
         display.SetStatus(DeviceStateMachine::GetStateName(machine.GetState()));
-        display.SetChatMessage("sys", "stage5 boot");
+        display.SetChatMessage("sys", "stage6 boot");
     }
     else{
         ESP_LOGW(TAG, "Display initialization failed, 跳过显示功能");
@@ -166,6 +182,10 @@ extern "C" void app_main(void)
 
     NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
 
+    AudioService audio_service;
+    audio_service.Initialize(&audio_codec);
+    audio_service.Start();
+
     DeviceState last_state = machine.GetState();
 
     bool last_connected = false;
@@ -179,15 +199,18 @@ extern "C" void app_main(void)
 
         if(state != last_state){
             if(state == kDeviceStateListening){
-                audio_codec.EnableInput(true);
+                audio_service.EnableVoiceProcessing(true);
             }
             else if(last_state == kDeviceStateListening){
-                audio_codec.EnableInput(false);
+                audio_service.EnableVoiceProcessing(false);
             }
         }
         LedColorForState(led, state);
-        vTaskDelay(pdMS_TO_TICKS(60));
-        led.Off();
+        if(state != kDeviceStateListening){
+            vTaskDelay(pdMS_TO_TICKS(60));
+            led.Off();
+        }
+        
         if(display_ok){
             display.SetStatus(DeviceStateMachine::GetStateName(state));
             const bool connected = wifi.IsConnected();
@@ -205,7 +228,7 @@ extern "C" void app_main(void)
             }
 
             if(state == kDeviceStateListening){
-                ShowMicLevel(display, audio_codec);
+                ShowLevelBar(display, audio_service.GetLevel());
             }
         }
         last_state = state;
@@ -218,7 +241,7 @@ extern "C" void app_main(void)
             }
         }
         
-        vTaskDelay(pdMS_TO_TICKS(state == kDeviceStateListening ? 60 : 940));
+        vTaskDelay(pdMS_TO_TICKS(state == kDeviceStateListening ? 40 : 940));
     }
 }
 

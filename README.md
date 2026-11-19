@@ -52,7 +52,8 @@ Linux / macOS 把 `Copy-Item` 换成 `cp`、`COM12` 换成 `/dev/ttyACM0` 之类
 | `stage3` | Wi-Fi 接入：`WifiStation` 封装（扫描/关联、事件回调、`esp_timer` 5 秒自动重连）、心跳栏显示 IP / RSSI / PSRAM 空闲 | `main/wifi.cc` `main/wifi.h` |
 | `stage4` | 状态机与按键：`DeviceStateMachine` 合法迁移表 + 监听器；`Button` 20ms 轮询消抖、短按/长按/按下/松开四种事件；BOOT 键点按切换说话状态，TALK 键按住说话 | `main/device_state_machine.*` `main/device_state.h` `main/button.*` |
 | `stage5` | 音频采集：`AudioCodec` 抽象基类（模板方法：公开 `InputData` 统一入口、派生类只实现 `Read`）+ `NoAudioCodecSimplex` 直驱 I2S0 读 INMP441；处于 listening 时屏上显示实时 MIC 电平条 | `main/audio_codec.*` `main/no_audio_codec.*` |
-| `stage6` | *规划中* | — |
+| `stage6` | 音频服务：`AudioService` 三任务流水线（采集 / 处理 / 播放）、`std::deque` 帧队列 + 条件变量背压；响度用 attack/release 包络平滑，主循环只读 `GetLevel()`；音频代码迁入 `main/audio/` | `main/audio/*` |
+| `stage7` | *规划中* | — |
 
 查看仓库里已有哪些期：
 
@@ -120,6 +121,9 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 9. **I2S 麦克风读回来全是 0，先分清是"没时钟"还是"没数据"**
    `stage5` 调试实录：先打印 32 位原始值，得到 `bytes=960 raw: 0 0 0 0 0 0`——`bytes=960` 恰好是 240 帧 × 4 字节，说明**通道使能、DMA 搬运、时钟输出全部正常**，问题只可能在那根数据线上。验证法：把 DIN 引脚临时当普通 GPIO，分别开内部上拉/下拉各读一次——`上拉读=1 下拉读=0` 就是**悬空**（没人驱动）。INMP441 上最常见三处：① 构造参数顺序写错（`(sample_rate, sck, ws, din)` 被传成 `(…, ws, sck, din)`，WS/SCK 互换后时序全废）；② **L/R 脚悬空** → 数据脚 SD 进高阻 → 读全 0（接 GND 才是左声道）；③ L/R 接 3.3V 时数据只在右声道，而代码读的是 `I2S_STD_SLOT_LEFT` → 也是全 0。另一个判断技巧：因为 `InputData()` 读失败会直接 `return false` 而屏幕不刷新，所以**只要屏上能显示出 "Mic: 0"，就证明读取是成功的**，不用再怀疑通道使能。最后：INMP441 是 24 位数据，`raw[i] >> 12` 只砍 12 位会留下 16 倍余量导致饱和，确认对齐方式后应为 `>> 16`（左对齐）或 `>> 8`（右对齐）。
 
+10. **把采集搬进独立任务后，要想清楚谁阻塞、谁丢帧**
+    `stage6` 的 `AudioService` 是三级流水线：input（优先级 8，阻塞式读 I2S）→ 帧队列（最多 4 帧 ≈ 60ms）→ process（优先级 2，算 attack/release 包络）→ output（优先级 4，等 stage7 接扬声器）。三个后果值得记住：① 队列满时 input 任务**阻塞等待**（反压），而 I2S 硬件仍在往 DMA 里写，6×15ms=90ms 之后就开始丢东西，所以采集任务优先级必须高于处理任务，宁可卡处理也不能让 DMA 溢出；② `EnableVoiceProcessing(false)` 直接调 `codec_->EnableInput(false)` → `i2s_channel_disable()`，而此时 input 任务可能正阻塞在 `i2s_channel_read()` 里（超时 200ms），二者存在竞争，目前靠 read 超时兜底——更稳的做法是先置标志、等任务回到等待点再动硬件；③ 启用后先丢 `AUDIO_INPUT_WARMUP_FRAMES` 帧（预热）再入队，用于滤掉通道刚启动那一瞬的无效数据。另外：把 `std::condition_variable` 用在 ESP-IDF 是可行的（底层是 pthread），但所有等待都必须带 `service_stopped_` 断言，否则析构时任务永远醒不来。
+
 ## 目录结构
 
 ```
@@ -140,8 +144,10 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 │   ├── device_state_machine.*  状态机（合法迁移表 + 状态变化监听器）
 │   ├── device_state.h          状态枚举
 │   ├── button.cc / button.h    按键（20ms 轮询消抖 + 按下/松开/单击/长按）
-│   ├── audio_codec.cc / .h     音频输入抽象基类（InputData → Read 模板方法）
-│   ├── no_audio_codec.*        不用编解码芯片、直驱 I2S 的派生实现（INMP441）
+│   ├── audio/
+│   │   ├── audio_codec.cc / .h  音频输入抽象基类（InputData → Read 模板方法）
+│   │   ├── no_audio_codec.*     不用编解码芯片、直驱 I2S 的派生实现（INMP441）
+│   │   └── audio_service.*      三级流水线：采集 / 处理 / 播放 + 响度包络
 │   └── main.cc                 app_main 入口
 └── tools
     └── gen_font8x16.ps1        字模生成脚本（改字体后重新生成 font.cc）
