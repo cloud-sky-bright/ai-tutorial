@@ -16,18 +16,16 @@
 #include "audio/no_audio_codec.h"
 #include "audio/audio_service.h"
 #include <string>
+#include <atomic>
 #include <vector>
 
 #include "device_state.h"
 
 
-static const char* TAG = "stage6";
+static const char* TAG = "stage7";
 
 static void LedColorForState(Led& led, DeviceState state) {
     switch(state){
-        case kDeviceStateListening:
-            led.SetColor(0, 28, 0);
-            break;
         case kDeviceStateSpeaking:
             led.SetColor(28, 0, 28);
             break;
@@ -66,7 +64,7 @@ static void LedColorForState(Led& led, DeviceState state) {
 //     display.ShowNotification((std::string(head) + "\n" + bar).c_str());
 // }
 
-static void ShowLevelBar(Display& display, int level){
+static void ShowLevelBar(Display& display, int level, bool speaking){
     int cells = level / 250;
     if(cells > 14){
         cells = 14;
@@ -76,15 +74,15 @@ static void ShowLevelBar(Display& display, int level){
         bar += (i < cells) ? "#" : ".";
     }
     bar += "]";
-    char head[16];
-    snprintf(head, sizeof(head), "Mic: %d", level);
+    char head[24];
+    snprintf(head, sizeof(head), speaking ? "mic %d <<TALK" : "mic %d", level);
     display.ShowNotification((std::string(head) + "\n" + bar).c_str());
 }
 
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "=============================");
-    ESP_LOGI(TAG, "小智简易版 · stage 6 音频服务");
+    ESP_LOGI(TAG, "小智简易版 · stage 7 说话检测");
     ESP_LOGI(TAG, "=============================");
     
     esp_err_t nvs_err = nvs_flash_init();
@@ -129,7 +127,7 @@ extern "C" void app_main(void)
         oled.DrawBootScreen();
         vTaskDelay(pdMS_TO_TICKS(1000));
         display.SetStatus(DeviceStateMachine::GetStateName(machine.GetState()));
-        display.SetChatMessage("sys", "stage6 boot");
+        display.SetChatMessage("sys", "stage7 boot");
     }
     else{
         ESP_LOGW(TAG, "Display initialization failed, 跳过显示功能");
@@ -186,12 +184,29 @@ extern "C" void app_main(void)
     audio_service.Initialize(&audio_codec);
     audio_service.Start();
 
+    std::atomic<bool> speech_finished{false};
+    audio_service.OnVadStateChange([&speech_finished](bool speaking){
+        if(!speaking){
+            ESP_LOGI(TAG, "Speech finished");
+            speech_finished.store(true);
+        }
+    });
+
     DeviceState last_state = machine.GetState();
 
     bool last_connected = false;
     int heartbeat = 0;
     while(true){
         heartbeat++;
+
+        if(speech_finished.exchange(false) && machine.GetState() == kDeviceStateListening){
+            ESP_LOGI(TAG, "Speech finished, transitioning to kDeviceStateIdle");
+            if(display_ok){
+                display.SetChatMessage("sys", "speech finished");
+            }
+            machine.TransitionTo(kDeviceStateIdle);
+        }
+
         if(machine.GetState() == kDeviceStateStarting && wifi.IsConnected()){
             machine.TransitionTo(kDeviceStateIdle);
         }
@@ -206,7 +221,11 @@ extern "C" void app_main(void)
             }
         }
         LedColorForState(led, state);
-        if(state != kDeviceStateListening){
+        if(state == kDeviceStateListening){
+            led.SetColor(0, audio_service.IsVoiceDetected() ? 32 : 10, 0);
+        }
+        else {
+            LedColorForState(led, state);
             vTaskDelay(pdMS_TO_TICKS(60));
             led.Off();
         }
@@ -228,7 +247,7 @@ extern "C" void app_main(void)
             }
 
             if(state == kDeviceStateListening){
-                ShowLevelBar(display, audio_service.GetLevel());
+                ShowLevelBar(display, audio_service.GetLevel(), audio_service.IsVoiceDetected());
             }
         }
         last_state = state;

@@ -53,7 +53,8 @@ Linux / macOS 把 `Copy-Item` 换成 `cp`、`COM12` 换成 `/dev/ttyACM0` 之类
 | `stage4` | 状态机与按键：`DeviceStateMachine` 合法迁移表 + 监听器；`Button` 20ms 轮询消抖、短按/长按/按下/松开四种事件；BOOT 键点按切换说话状态，TALK 键按住说话 | `main/device_state_machine.*` `main/device_state.h` `main/button.*` |
 | `stage5` | 音频采集：`AudioCodec` 抽象基类（模板方法：公开 `InputData` 统一入口、派生类只实现 `Read`）+ `NoAudioCodecSimplex` 直驱 I2S0 读 INMP441；处于 listening 时屏上显示实时 MIC 电平条 | `main/audio_codec.*` `main/no_audio_codec.*` |
 | `stage6` | 音频服务：`AudioService` 三任务流水线（采集 / 处理 / 播放）、`std::deque` 帧队列 + 条件变量背压；响度用 attack/release 包络平滑，主循环只读 `GetLevel()`；音频代码迁入 `main/audio/` | `main/audio/*` |
-| `stage7` | *规划中* | — |
+| `stage7` | 语音活动检测：`VadProcessor` 按每帧平均幅度做能量判决，3 帧起说 / 50 帧停说（双门限滞回）；回调经 `AudioService` 再透传到应用层；说话时 LED 绿灯变亮、屏幕标题出现 `<<TALK`，说完一句自动 `listening → idle` | `main/audio/vad_processor.*` |
+| `stage8` | *规划中* | — |
 
 查看仓库里已有哪些期：
 
@@ -122,7 +123,10 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
    `stage5` 调试实录：先打印 32 位原始值，得到 `bytes=960 raw: 0 0 0 0 0 0`——`bytes=960` 恰好是 240 帧 × 4 字节，说明**通道使能、DMA 搬运、时钟输出全部正常**，问题只可能在那根数据线上。验证法：把 DIN 引脚临时当普通 GPIO，分别开内部上拉/下拉各读一次——`上拉读=1 下拉读=0` 就是**悬空**（没人驱动）。INMP441 上最常见三处：① 构造参数顺序写错（`(sample_rate, sck, ws, din)` 被传成 `(…, ws, sck, din)`，WS/SCK 互换后时序全废）；② **L/R 脚悬空** → 数据脚 SD 进高阻 → 读全 0（接 GND 才是左声道）；③ L/R 接 3.3V 时数据只在右声道，而代码读的是 `I2S_STD_SLOT_LEFT` → 也是全 0。另一个判断技巧：因为 `InputData()` 读失败会直接 `return false` 而屏幕不刷新，所以**只要屏上能显示出 "Mic: 0"，就证明读取是成功的**，不用再怀疑通道使能。最后：INMP441 是 24 位数据，`raw[i] >> 12` 只砍 12 位会留下 16 倍余量导致饱和，确认对齐方式后应为 `>> 16`（左对齐）或 `>> 8`（右对齐）。
 
 10. **把采集搬进独立任务后，要想清楚谁阻塞、谁丢帧**
-    `stage6` 的 `AudioService` 是三级流水线：input（优先级 8，阻塞式读 I2S）→ 帧队列（最多 4 帧 ≈ 60ms）→ process（优先级 2，算 attack/release 包络）→ output（优先级 4，等 stage7 接扬声器）。三个后果值得记住：① 队列满时 input 任务**阻塞等待**（反压），而 I2S 硬件仍在往 DMA 里写，6×15ms=90ms 之后就开始丢东西，所以采集任务优先级必须高于处理任务，宁可卡处理也不能让 DMA 溢出；② `EnableVoiceProcessing(false)` 直接调 `codec_->EnableInput(false)` → `i2s_channel_disable()`，而此时 input 任务可能正阻塞在 `i2s_channel_read()` 里（超时 200ms），二者存在竞争，目前靠 read 超时兜底——更稳的做法是先置标志、等任务回到等待点再动硬件；③ 启用后先丢 `AUDIO_INPUT_WARMUP_FRAMES` 帧（预热）再入队，用于滤掉通道刚启动那一瞬的无效数据。另外：把 `std::condition_variable` 用在 ESP-IDF 是可行的（底层是 pthread），但所有等待都必须带 `service_stopped_` 断言，否则析构时任务永远醒不来。
+    `stage6` 的 `AudioService` 是三级流水线：input（优先级 8，阻塞式读 I2S）→ 帧队列（最多 4 帧 ≈ 60ms）→ process（优先级 2，算 attack/release 包络）→ output（优先级 4，目前空转，留给后续接扬声器）。三个后果值得记住：① 队列满时 input 任务**阻塞等待**（反压），而 I2S 硬件仍在往 DMA 里写，6×15ms=90ms 之后就开始丢东西，所以采集任务优先级必须高于处理任务，宁可卡处理也不能让 DMA 溢出；② `EnableVoiceProcessing(false)` 直接调 `codec_->EnableInput(false)` → `i2s_channel_disable()`，而此时 input 任务可能正阻塞在 `i2s_channel_read()` 里（超时 200ms），二者存在竞争，目前靠 read 超时兜底——更稳的做法是先置标志、等任务回到等待点再动硬件；③ 启用后先丢 `AUDIO_INPUT_WARMUP_FRAMES` 帧（预热）再入队，用于滤掉通道刚启动那一瞬的无效数据。另外：把 `std::condition_variable` 用在 ESP-IDF 是可行的（底层是 pthread），但所有等待都必须带 `service_stopped_` 断言，否则析构时任务永远醒不来。
+
+11. **语音检测（VAD）的门限是「帧数」，不是「时间」，而且门限值不能照抄**
+    `stage7` 的 `VadProcessor` 用 `VAD_START_FRAMES = 3` / `VAD_STOP_FRAMES = 50`，一帧是 `AUDIO_CODEC_DMA_FRAME_NUM = 240` 点 ÷ 16 kHz ≈ 15 ms，所以**起说延迟约 45 ms、停说判定约 750 ms**；改帧长就等于悄悄改了这两段时间。两个方向都要留滞回：只设一个门限会让电平在门限附近抖动时疯狂重复 `说话/结束说话`。另外 `VAD_ENERGY_THRESHOLD = 1200` 是**绝对值**（平均幅度，满量程 32767 的 3.7%），换麦克风、改增益、甚至换个房间背景噪声变了都得重新标定——先看日志里静止时的 `level`，把门限定在噪声的 2~3 倍。还有一点容易踩：`Feed()` 顺便把算出来的电平返回给响度条，判决和取电平耦合在同一个函数里，改判决逻辑时别把返回值改坏。最后，VAD 回调跑在 process 任务里，**里面不能做阻塞操作**（刷 I2C 屏 ≈ 12 ms、`vTaskDelay`、等队列）；`main` 现在的做法是用 `std::atomic<bool>` 置标志、回到主循环再 `exchange(false)` 处理，这是对的模式。
 
 ## 目录结构
 
@@ -147,7 +151,8 @@ git diff --cached | Select-String "sk-|password|ssid|api_key"
 │   ├── audio/
 │   │   ├── audio_codec.cc / .h  音频输入抽象基类（InputData → Read 模板方法）
 │   │   ├── no_audio_codec.*     不用编解码芯片、直驱 I2S 的派生实现（INMP441）
-│   │   └── audio_service.*      三级流水线：采集 / 处理 / 播放 + 响度包络
+│   │   ├── audio_service.*      三级流水线：采集 / 处理 / 播放 + 响度包络
+│   │   └── vad_processor.*      语音活动检测（能量门限 + 起停帧计数滞回）
 │   └── main.cc                 app_main 入口
 └── tools
     └── gen_font8x16.ps1        字模生成脚本（改字体后重新生成 font.cc）

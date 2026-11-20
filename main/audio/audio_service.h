@@ -7,6 +7,8 @@
 #include <deque>
 #include <mutex>
 #include <vector>
+#include "audio/vad_processor.h"
+#include <functional>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -27,6 +29,14 @@ public:
     void EnableVoiceProcessing(bool enable);
     bool IsVoiceProcessingRunning() const;
 
+    using VadCallback = VadProcessor::VadCallback;
+    void OnVadStateChange(VadCallback callback);
+
+
+    bool IsVoiceDetected() const {
+        return voice_detected_.load();
+    }
+
     int GetLevel() const { return level_.load(); }
 private:
     void AudioInputTask();
@@ -43,6 +53,10 @@ private:
     std::condition_variable queue_cv_;
     std::deque<std::vector<int16_t>> audio_encode_queue_;
     std::deque<std::vector<int16_t>> audio_playback_queue_;
+
+    VadProcessor vad_processor_;
+    VadCallback vad_callback_;
+    std::atomic<bool> voice_detected_{false};
 
 //     麦克风（INMP441）
 //    │ 采样 → ADC → 24 位数字，从 SD 线一位一位送出

@@ -9,6 +9,13 @@ AudioService::~AudioService() {
 
 void AudioService::Initialize(AudioCodec* codec) {
     codec_ = codec;
+    vad_processor_.OnVadStateChange([this](bool speaking) {
+        voice_detected_.store(speaking);
+        if (vad_callback_) {
+            vad_callback_(speaking);
+        }
+    });
+    
     ESP_LOGI(TAG, "Audio service initialized");
 }
 
@@ -49,9 +56,12 @@ void AudioService::EnableVoiceProcessing(bool enable) {
         voice_processing_enabled_ = enable;
         if(enable){
             warmup_frames_left_ = AUDIO_INPUT_WARMUP_FRAMES;
+            vad_processor_.Reset();
         }
         else{
             level_.store(0);
+            voice_detected_.store(false);
+            audio_encode_queue_.clear();
         }
     }
     queue_cv_.notify_all();
@@ -63,6 +73,10 @@ void AudioService::EnableVoiceProcessing(bool enable) {
 bool AudioService::IsVoiceProcessingRunning() const {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     return voice_processing_enabled_;
+}
+
+void AudioService::OnVadStateChange(VadCallback callback) {
+    vad_callback_ = std::move(callback);
 }
 
 void AudioService::AudioInputTask() {
@@ -112,11 +126,7 @@ void AudioService::AudioProcessTask() {
             audio_encode_queue_.pop_front();
             queue_cv_.notify_all();
         }
-        int64_t sum = 0;
-        for(int16_t s : frame){
-            sum += (s >= 0) ? s : -s;
-        }
-        const int mean = frame.empty() ? 0 : static_cast<int>(sum / frame.size());
+        const int mean = vad_processor_.Feed(frame);
 
         int level = level_.load();
         if(mean > level){
